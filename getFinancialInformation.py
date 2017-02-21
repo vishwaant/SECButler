@@ -47,10 +47,13 @@ class createCIKLookup(luigi.Task):
             position += length
 
     def run(self):
+        company_dict={}
         print "++++++++++++"
         crawl_file =  open(output_folder + "/crawler_{}.idx".format(self.date), "r")
         for line in crawl_file.readlines():
-            print list(self.slices(line,62,12,12,98))
+            company,form,cik,rest = self.slices(line,62,12,12,98)
+            company_dict[cik]=company
+        # print company_dict
         print "++++++++++++"
 
     # def output(self):
