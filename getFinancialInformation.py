@@ -7,6 +7,7 @@ import string,requests
 from bs4 import BeautifulSoup
 
 output_folder = "../../../Data/SEC"
+forms_folder = output_folder+"/forms"
 lookups_folder = output_folder+"/lookups"
 URL="https://www.sec.gov/Archives/edgar/full-index/"
 
@@ -15,12 +16,13 @@ class PrepareEnv(luigi.Task):
     def run(self):
         if not os.path.exists(output_folder): os.makedirs(output_folder)
         if not os.path.exists(lookups_folder): os.makedirs(lookups_folder)
+        if not os.path.exists(forms_folder): os.makedirs(forms_folder)
 
     def output(self):
-        return [luigi.LocalTarget(path=output_folder),luigi.LocalTarget(path=lookups_folder)]
+        return [luigi.LocalTarget(path=output_folder),luigi.LocalTarget(path=lookups_folder),luigi.LocalTarget(path=forms_folder)]
 
 
-class getCrawler(luigi.Task):
+class GetCrawler(luigi.Task):
 
     date = luigi.DateParameter()
 
@@ -39,12 +41,12 @@ class getCrawler(luigi.Task):
 
 
 
-class createCIKLookup(luigi.Task):
+class CreateCIKLookup(luigi.Task):
 
     date = luigi.DateParameter()
 
     def requires(self):
-        return [PrepareEnv(),getCrawler(self.date)]
+        return [PrepareEnv(),GetCrawler(self.date)]
 
     def slices(self,s, *args):
         position = 0
@@ -78,17 +80,23 @@ class createCIKLookup(luigi.Task):
 class parse13FHR(luigi.Task):
 
     date = luigi.DateParameter()
+    sec_root="https://www.sec.gov/"
     url = "https://www.sec.gov/Archives/edgar/data/1602119/0000950123-17-000678-index.htm"
 
     def requires(self):
-        return [PrepareEnv(),getCrawler(self.date),createCIKLookup(self.date)]
+        return [PrepareEnv(),GetCrawler(self.date),CreateCIKLookup(self.date)]
 
 
     def run(self):
         sec_main_page = requests.get(self.url,timeout=60)
         sec_soup = BeautifulSoup(sec_main_page.text,"lxml")
-        print [a["href"] for a in sec_soup.find_all('a') if a.text=="form13fInfoTable.html"]
+        form13f_path = "".join([a["href"] for a in sec_soup.find_all('a') if a.text=="form13fInfoTable.html"])
+        form13f_page = requests.get(self.sec_root+form13f_path,timeout=60)
+        form13f_soup = BeautifulSoup(form13f_page.text, "lxml")
+        print form13f_soup
 
+    def complete(self):
+        return False
 
     # def output(self):
     #     return luigi.LocalTarget(path=lookups_folder+"/company_{}.json".format(self.date))
