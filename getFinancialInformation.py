@@ -1,10 +1,20 @@
 # -*- coding: utf-8 -*-
+"""
+
+Author: Vishwaant Kannaiyan
+Notes: This Program consumes SEC forms filed by companies and parses them to extract
+    key information about their performance and revenue.
+The current version primarily focuses on Form 13F-HR which is submitted by Institutional investors
+
+"""
 
 import os
 import re
 import ujson
+from datetime import date
 
 import luigi
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
@@ -102,15 +112,12 @@ class CreateCIKLookup(luigi.Task):
 
 
 
-class ListCompanyURLByForm(luigi.Task):
+class ListCompanyURLByForm(luigi.WrapperTask):
 
     date = luigi.DateParameter()
     form = luigi.Parameter(default="8-K")
 
     def requires(self):
-        return [PrepareEnv(dirs=self.form),GetCrawler(self.date),CreateCIKLookup(self.date)]
-
-    def run(self):
         param_list=[]
         processed_param_list = []
         for file_name in os.listdir(forms_folder + "/" + self.form):
@@ -131,17 +138,18 @@ class ListCompanyURLByForm(luigi.Task):
                         # print k,v[0]['form'],v[0]['date'],v[0]['url']
 
         # print processed_param_list.__len__()
-        # print processed_param_list
-        for elem in param_list:
-        #     # print elem
-            if elem[-4] in processed_param_list:
-                param_list.remove(elem)
-        #     # else:
-        #     #     print "N",elem
-        #
+        # # print processed_param_list
+        # for elem in param_list:
+        # #     # print elem
+        #     if elem[0] in processed_param_list:
+        #         param_list.remove(elem)
+        # #     # else:
+        # #     #     print "N",elem
+        # #
         # print param_list.__len__()
 
-        yield Parse13FHR(date=self.date,list=param_list)
+        for params in param_list:
+            yield Parse13FHR(date=self.date,config=params)
         # print param_list
 
     # def output(self):
@@ -149,11 +157,48 @@ class ListCompanyURLByForm(luigi.Task):
 
 
 
+class LoadToDataFrame(luigi.Task):
+    form = luigi.Parameter(default='13F-HR')
+    rundate = luigi.DateParameter(default=date.today().strftime("%Y-%m-%d"))
+
+    def returnDataFrame(self,FILE_N):
+        file_parts = FILE_N.replace(".json", "").split("_")
+        with open(forms_folder+"/"+self.form+"/"+FILE_N) as json_file:
+            dumps = ujson.load(json_file)
+
+        df = pd.DataFrame(dumps)
+        ##Drop the first three rows
+        df.columns = ["NAME OF ISSUER", "TITLE OF CLASS", "CUSIP", "VALUE", "SHARES(X$1000)", "SH/PRN AMT", "PUT/CALL",
+                      "INVESTMENT DISCRETION", "OTHER MANAGER", "VOTING AUTH SOLE", "VOTING AUTH SHARED",
+                      "VOTING AUTH NONE"]
+        df.insert(0, "CIK", file_parts[2])
+        df.insert(1, "FILE DATE", file_parts[3])
+        df.drop(df.index[[0, 1, 2]], inplace=True)
+        df.drop(["TITLE OF CLASS", "SH/PRN AMT", "PUT/CALL",
+                      "INVESTMENT DISCRETION", "OTHER MANAGER", "VOTING AUTH SOLE", "VOTING AUTH SHARED",
+                      "VOTING AUTH NONE"],axis=1, inplace=True)
+        return df
+
+
+    def run(self):
+        df_full = pd.DataFrame()
+        for file_name in os.listdir(forms_folder + "/" + self.form):
+            print "Extacting from ",file_name
+            df = self.returnDataFrame(file_name)
+            df_full = pd.concat([df,df_full])
+
+        df_full.to_pickle(lookups_folder+"/"+self.form+".p")
+
+    def output(self):
+        return luigi.LocalTarget(path=lookups_folder+"/"+self.form+".p")
+
+
+
 class Parse13FHR(luigi.Task):
 
     sec_root="https://www.sec.gov/"
     form = '13F-HR'
-    list = luigi.ListParameter()
+    config = luigi.ListParameter()
     date = luigi.DateParameter()
     # cik = luigi.Parameter()
     # d_of_file = luigi.Parameter()
@@ -161,22 +206,24 @@ class Parse13FHR(luigi.Task):
     # url = "https://www.sec.gov/Archives/edgar/data/1602119/0000950123-17-000678-index.htm"
 
     def requires(self):
-        return [PrepareEnv(dirs="13F-HR"),GetCrawler(self.date),CreateCIKLookup(self.date)]
+        return [PrepareEnv(dirs="13F-HR")]
 
     def run(self):
-        print "length ",self.list.__len__()
-        for config in self.list:
-            cik = config[0]
-            form = config[1]
-            d_of_file = config[2]
-            url = config[3]
-            print "Parsing 13F-HR"
-            print cik,form,d_of_file,url
-            form_data = []
-            sec_main_page = requests.get(url,timeout=60)
-            sec_soup = BeautifulSoup(sec_main_page.text,"lxml")
+        # print "length ",self.list.__len__()
+        # for config in self.list:
+        cik = self.config[0]
+        form = self.config[1]
+        d_of_file = self.config[2]
+        url = self.config[3]
+        print "Parsing 13F-HR"
+        print cik,form,d_of_file,url
+        form_data = []
+        sec_main_page = requests.get(url,timeout=120)
+        sec_soup = BeautifulSoup(sec_main_page.text,"lxml")
+        try:
             form13f_path = "".join([a["href"] for a in sec_soup.find_all('a') if re.match(r'.*\.(htm|html)$', a.text) and a.text not in 'primary_doc.html'])
             print form13f_path
+
             form13f_page = requests.get(self.sec_root+form13f_path,timeout=60)
             # print form13f_page.status_code
             form13f_soup = BeautifulSoup(form13f_page.text, "lxml")
@@ -185,16 +232,16 @@ class Parse13FHR(luigi.Task):
             # print table
             for tr in  table.find_all('tr'):
                 form_data.append([td.text for td in tr.find_all('td')])
-            with open(forms_folder+"/"+self.form+"/%s_%s_%s_%s.json"%(form,format(self.date),format(cik),format(d_of_file)),'w') as dta:
-                ujson.dump(form_data,dta)
-            print "Completed Parsing"
+        except:
+            print "Some issue with ",url
+
+        with open(forms_folder+"/"+self.form+"/%s_%s_%s_%s.json"%(form,format(self.date),format(cik),format(d_of_file)),'w') as dta:
+            ujson.dump(form_data,dta)
+        print "Completed Parsing"
 
     def output(self):
-        return [luigi.LocalTarget(path=forms_folder+"/"+self.form+"/%s_%s_%s_%s.json"%(self.form,format(self.date),format(config[0]),format(config[2]))) for config in self.list]
-        # cik = config[0]
-        # form = config[1]
-        # d_of_file = config[2]
-        # url = config[3])
+        return [luigi.LocalTarget(path=forms_folder+"/"+self.form+"/%s_%s_%s_%s.json"%(self.form,format(self.date),format(self.config[0]),format(self.config[2])))]
+
 
 
     class CreateParseConfig(luigi.Task):
