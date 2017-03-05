@@ -87,3 +87,10 @@ ENV/
 
 # Rope project settings
 .ropeproject
+/getCrawler.py
+.idea/workspace.xml
+Test.ipynb
+getCrawler.py
+luigi.cfg
+merge13FHR.py
+/local_history.patch

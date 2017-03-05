@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+
 """
 
 Author: Vishwaant Kannaiyan
@@ -8,10 +8,15 @@ The current version primarily focuses on Form 13F-HR which is submitted by Insti
 
 """
 
+import locale
+
+locale.setlocale(locale.LC_NUMERIC, '')
 import os
 import re
 import ujson
 from datetime import date
+from matplotlib import style
+style.use("fivethirtyeight")
 
 import luigi
 import pandas as pd
@@ -25,7 +30,7 @@ URL="https://www.sec.gov/Archives/edgar/full-index/"
 
 class PrepareEnv(luigi.Task):
 
-    dirs = luigi.Parameter(description="Enter list of directories to be created followed by comma")
+    dirs = luigi.Parameter(default=None,description="Enter list of directories to be created followed by comma")
 
     def run(self):
         if not os.path.exists(output_folder): os.makedirs(output_folder)
@@ -37,6 +42,40 @@ class PrepareEnv(luigi.Task):
 
     def output(self):
         return [luigi.LocalTarget(path=output_folder),luigi.LocalTarget(path=lookups_folder),luigi.LocalTarget(path=forms_folder)]
+
+
+class GetCrawlerByRange(luigi.WrapperTask):
+
+    start_year = luigi.Parameter()
+    stop_year = luigi.Parameter()
+
+    def requires(self):
+        for year in xrange(int(self.start_year),int(self.stop_year)):
+            yield GetCrawlerByYear(fetchyear=str(year))
+
+
+
+class GetCrawlerByYear(luigi.Task):
+
+    fetchyear = luigi.Parameter(default="2016")
+
+    def requires(self):
+        return PrepareEnv()
+
+    def run(self):
+        for QTR in ['QTR1','QTR2','QTR3','QTR4']:
+            CRAWLER_URL = URL+"/"+self.fetchyear+"/"+QTR+"/"+"crawler.idx"
+            try:
+                response = requests.get(CRAWLER_URL)
+                with open(output_folder+"/crawler_{0}_{1}.idx".format(self.fetchyear,QTR),"wb") as crawl:
+                    crawl.write(response.text)
+            except:
+                print "Failed Getting anything from ",CRAWLER_URL
+                pass
+
+    def output(self):
+        return [luigi.LocalTarget(path=output_folder+"/crawler_{0}_{1}.idx".format(self.fetchyear,QTR)) for QTR in ['QTR1','QTR2','QTR3','QTR4']]
+
 
 
 class GetCrawler(luigi.Task):
@@ -123,9 +162,9 @@ class ListCompanyURLByForm(luigi.WrapperTask):
         for file_name in os.listdir(forms_folder + "/" + self.form):
             # 13F-HR_2017-02-20_1041241_2017-02-08.json
             fl_split = file_name.replace('.json','').split("_")
-            form_name = unicode(fl_split[0], "utf-8")
+            # form_name = unicode(fl_split[0], "utf-8")
             cik_name = unicode(fl_split[2], "utf-8")
-            date_file = unicode(fl_split[3], "utf-8")
+            # date_file = unicode(fl_split[3], "utf-8")
             processed_param_list.append(cik_name)
             # processed_param_list.append([cik_name, form_name, date_file])
 
@@ -133,65 +172,14 @@ class ListCompanyURLByForm(luigi.WrapperTask):
             cik_form_url_dict = ujson.load(lkp)
             for item in cik_form_url_dict['root']:
                 for k,v in item.iteritems():
-                    if v[0]['form'] == self.form:
-                        param_list.append([k,v[0]['form'],v[0]['date'],v[0]['url']])
-                        # print k,v[0]['form'],v[0]['date'],v[0]['url']
-
-        # print processed_param_list.__len__()
-        # # print processed_param_list
-        # for elem in param_list:
-        # #     # print elem
-        #     if elem[0] in processed_param_list:
-        #         param_list.remove(elem)
-        # #     # else:
-        # #     #     print "N",elem
-        # #
-        # print param_list.__len__()
+                    if k not in processed_param_list:
+                        if v[0]['form'] == self.form:
+                            param_list.append([k,v[0]['form'],v[0]['date'],v[0]['url']])
+                            # print k,v[0]['form'],v[0]['date'],v[0]['url']
 
         for params in param_list:
             yield Parse13FHR(date=self.date,config=params)
         # print param_list
-
-    # def output(self):
-    #     return luigi.LocalTarget(path=forms_folder+"/"+self.form+"/%s_%s_%s_%s.json"%(self.form,format(self.date),format(cik),format(d_of_file)))
-
-
-
-class LoadToDataFrame(luigi.Task):
-    form = luigi.Parameter(default='13F-HR')
-    rundate = luigi.DateParameter(default=date.today().strftime("%Y-%m-%d"))
-
-    def returnDataFrame(self,FILE_N):
-        file_parts = FILE_N.replace(".json", "").split("_")
-        with open(forms_folder+"/"+self.form+"/"+FILE_N) as json_file:
-            dumps = ujson.load(json_file)
-
-        df = pd.DataFrame(dumps)
-        ##Drop the first three rows
-        df.columns = ["NAME OF ISSUER", "TITLE OF CLASS", "CUSIP", "VALUE", "SHARES(X$1000)", "SH/PRN AMT", "PUT/CALL",
-                      "INVESTMENT DISCRETION", "OTHER MANAGER", "VOTING AUTH SOLE", "VOTING AUTH SHARED",
-                      "VOTING AUTH NONE"]
-        df.insert(0, "CIK", file_parts[2])
-        df.insert(1, "FILE DATE", file_parts[3])
-        df.drop(df.index[[0, 1, 2]], inplace=True)
-        df.drop(["TITLE OF CLASS", "SH/PRN AMT", "PUT/CALL",
-                      "INVESTMENT DISCRETION", "OTHER MANAGER", "VOTING AUTH SOLE", "VOTING AUTH SHARED",
-                      "VOTING AUTH NONE"],axis=1, inplace=True)
-        return df
-
-
-    def run(self):
-        df_full = pd.DataFrame()
-        for file_name in os.listdir(forms_folder + "/" + self.form):
-            print "Extacting from ",file_name
-            df = self.returnDataFrame(file_name)
-            df_full = pd.concat([df,df_full])
-
-        df_full.to_pickle(lookups_folder+"/"+self.form+".p")
-
-    def output(self):
-        return luigi.LocalTarget(path=lookups_folder+"/"+self.form+".p")
-
 
 
 class Parse13FHR(luigi.Task):
@@ -200,68 +188,83 @@ class Parse13FHR(luigi.Task):
     form = '13F-HR'
     config = luigi.ListParameter()
     date = luigi.DateParameter()
-    # cik = luigi.Parameter()
-    # d_of_file = luigi.Parameter()
-    # url = luigi.Parameter()
-    # url = "https://www.sec.gov/Archives/edgar/data/1602119/0000950123-17-000678-index.htm"
 
     def requires(self):
         return [PrepareEnv(dirs="13F-HR")]
 
     def run(self):
-        # print "length ",self.list.__len__()
-        # for config in self.list:
         cik = self.config[0]
         form = self.config[1]
         d_of_file = self.config[2]
         url = self.config[3]
-        print "Parsing 13F-HR"
-        print cik,form,d_of_file,url
+        # print "Parsing 13F-HR"
+        # print cik,form,d_of_file,url
         form_data = []
         sec_main_page = requests.get(url,timeout=120)
         sec_soup = BeautifulSoup(sec_main_page.text,"lxml")
         try:
             form13f_path = "".join([a["href"] for a in sec_soup.find_all('a') if re.match(r'.*\.(htm|html)$', a.text) and a.text not in 'primary_doc.html'])
-            print form13f_path
+            print "Parsing :",form13f_path
 
             form13f_page = requests.get(self.sec_root+form13f_path,timeout=60)
-            # print form13f_page.status_code
             form13f_soup = BeautifulSoup(form13f_page.text, "lxml")
-            # print form13f_soup
             table = form13f_soup.find('table',{"summary":"Form 13F-NT Header Information"})
-            # print table
             for tr in  table.find_all('tr'):
-                form_data.append([td.text for td in tr.find_all('td')])
+                form_data.append([td.text.replace(',','').replace(u'\xa0','') for td in tr.find_all('td')])
         except:
             print "Some issue with ",url
 
+
         with open(forms_folder+"/"+self.form+"/%s_%s_%s_%s.json"%(form,format(self.date),format(cik),format(d_of_file)),'w') as dta:
             ujson.dump(form_data,dta)
-        print "Completed Parsing"
+
 
     def output(self):
         return [luigi.LocalTarget(path=forms_folder+"/"+self.form+"/%s_%s_%s_%s.json"%(self.form,format(self.date),format(self.config[0]),format(self.config[2])))]
 
 
+class LoadToDataFrame(luigi.Task):
 
-    class CreateParseConfig(luigi.Task):
-        date = luigi.DateParameter()
+    form = luigi.Parameter(default='13F-HR')
+    rundate = luigi.DateParameter(default=date.today().strftime("%Y-%m-%d"))
 
-        def requires(self):
-            return [PrepareEnv(dirs=""), GetCrawler(self.date)]
+    def returnDataFrame(self, FILE_N):
+        file_parts = FILE_N.replace(".json", "").split("_")
 
-        def run(self):
-            with open(lookups_folder + "/company_{}.json".format(self.date), 'r') as lkp:
-                print ujson.load(lkp)
+        df = pd.read_json(forms_folder + "/" + self.form + "/" + FILE_N, encoding='utf-8')
+        df.columns = ["ISSUER", "CLASS", "CUSIP", "VALUE", "SHARES", "AMT", "PUTCALL",
+                      "DISCRETION", "MANAGER", "SOLE", "SHARED",
+                      "AUTHNONE"]
+        df.insert(0, "CIK", file_parts[2])
+        df.insert(1, "FILEDATE", file_parts[3])
+        df.drop(df.index[[0, 1, 2]], inplace=True)
+        df.set_index('FILEDATE',inplace=True)
 
-        # def output(self):
-        #     return luigi.LocalTarget(path=lookups_folder+"/company_{}.json".format(self.date))
-        def complete(self):
-            return False
+        df.drop(["CLASS", "PUTCALL","AMT",
+                 "DISCRETION", "MANAGER", "SOLE", "SHARED",
+                 "AUTHNONE"], axis=1, inplace=True)
+
+        print df
+        df.VALUE = df.VALUE.astype(float)
+        df.SHARES = df.SHARES.astype(float)
+        return df
+
+
+    def run(self):
+        df_full = pd.DataFrame()
+        for file_name in os.listdir(forms_folder + "/" + self.form):
+            print "Extacting from ", file_name
+            df = self.returnDataFrame(file_name)
+            df_full = pd.concat([df, df_full])
+
+        df_full.to_pickle(lookups_folder + "/" + self.form + ".p")
+
+
+    def output(self):
+        return luigi.LocalTarget(path=lookups_folder + "/" + self.form + ".p")
 
 
 
-                #     return luigi.LocalTarget(path=lookups_folder+"/company_{}.json".format(self.date))
 
 
 if __name__ == "__main__":
